@@ -20,6 +20,23 @@ const RECORD_MAX_SECONDS = Number(process.env.RECORD_MAX_SECONDS || 20);
 const TRANSCRIBE_URL = process.env.TRANSCRIBE_URL;
 const MENU_PAGE_SIZE = 9; // מגבלת הקשה 1-9 לתפריט
 
+// גג זמן פנימי לכל פעולה שתלויה ב-WordPress (רשת חיצונית). מוגדר קצר בהרבה
+// ממגבלת ה-maxDuration של Vercel (30 שניות, ראה vercel.json), כדי שאם WP
+// איטי/לא מגיב, המשתמש יקבל הודעת שגיאה מדוברת מהר, במקום שהשיחה תישאר
+// שקטה עד שVercel עצמה תפיל את הפונקציה בכוח (מה שגרם לחזרה לתפריט הראשי
+// בלי הודעת שגיאה כלל).
+const WP_TIMEOUT_MS = Number(process.env.WP_TIMEOUT_MS || 8000);
+
+/** מריץ promise עם גג זמן; אם חלף הזמן - נזרקת שגיאה במקום להמתין לנצח */
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout after ${ms}ms: ${label}`)), ms)
+    ),
+  ]);
+}
+
 // ---- הודעות קבועות ----
 
 const MSG_WELCOME =
@@ -33,6 +50,7 @@ const MSG_INVALID_CHOICE = 'בחירה לא תקינה. נסו שוב';
 const MSG_NOT_FOUND = 'לא נמצאה תוצאה מתאימה לחיפוש שלכם. חוזרים לתפריט הראשי';
 const MSG_TRANSCRIBE_FAILED = 'לא הצלחנו לזהות את הדיבור. חוזרים לתפריט הראשי';
 const MSG_ERROR = 'אירעה שגיאה זמנית. נסו שוב מאוחר יותר';
+const MSG_WP_TIMEOUT = 'הטעינה התארכה מהצפוי. נסו שוב בעוד רגע';
 
 module.exports = async (req, res) => {
   try {
@@ -111,7 +129,13 @@ async function handleMainChoice(body) {
 // ---- נתיב קטגוריה: הצגת רשימת קטגוריות ----
 
 async function categoryMenu() {
-  const categories = await wp.getCategories();
+  let categories;
+  try {
+    categories = await withTimeout(wp.getCategories(), WP_TIMEOUT_MS, 'wp.getCategories');
+  } catch (err) {
+    console.error('categoryMenu timeout/error:', err);
+    return yemot.idListMessage([yemot.ttsSegment(MSG_WP_TIMEOUT)], yemot.goToFolder('/'));
+  }
 
   if (!categories.length) {
     return yemot.idListMessage([yemot.ttsSegment(MSG_NO_CATEGORIES)], yemot.goToFolder('/'));
@@ -134,7 +158,14 @@ async function categoryMenu() {
 
 async function handleCategoryChosen(body) {
   const idx = Number(body.CategoryChoice) - 1;
-  const categories = await wp.getCategories();
+  let categories, questions;
+  try {
+    categories = await withTimeout(wp.getCategories(), WP_TIMEOUT_MS, 'wp.getCategories');
+  } catch (err) {
+    console.error('handleCategoryChosen timeout/error (categories):', err);
+    return yemot.idListMessage([yemot.ttsSegment(MSG_WP_TIMEOUT)], yemot.goToFolder('/'));
+  }
+
   const page = categories.slice(0, MENU_PAGE_SIZE);
   const category = page[idx];
 
@@ -142,7 +173,16 @@ async function handleCategoryChosen(body) {
     return yemot.idListMessage([yemot.ttsSegment(MSG_INVALID_CHOICE)], yemot.goToFolder('/'));
   }
 
-  const questions = await wp.getQuestionsByCategory(category.id);
+  try {
+    questions = await withTimeout(
+      wp.getQuestionsByCategory(category.id),
+      WP_TIMEOUT_MS,
+      'wp.getQuestionsByCategory'
+    );
+  } catch (err) {
+    console.error('handleCategoryChosen timeout/error (questions):', err);
+    return yemot.idListMessage([yemot.ttsSegment(MSG_WP_TIMEOUT)], yemot.goToFolder('/'));
+  }
 
   if (!questions.length) {
     return yemot.idListMessage([yemot.ttsSegment(MSG_NO_QUESTIONS)], yemot.goToFolder('/'));
@@ -158,19 +198,47 @@ async function handleCategoryChosen(body) {
   // אחת בלבד מתבצעת). לכן איננו משרשרים כאן שום פעולה נוספת; זיהוי הקטגוריה
   // בשלב הבא (handleQuestionChosen) מתבסס על כך שימות שולחת שוב את כל
   // הפרמטרים שנאספו קודם בשיחה (כולל CategoryChoice) בכל בקשה עוקבת.
-  return yemot.read(prompt, `QuestionChoice,,${page2.length},1,20,Digits,yes,no`);
+  //
+  // משתמשים ב-readDigits (ולא ב-read הגולמי) כדי שערך 15 (confirmDigit)
+  // יוגדר תמיד ל-'no' - אחרת ימות מבקשת מהמשתמש לאשר את ההקשה בנפרד
+  // ("לאישור הקישו אחת") לפני שממשיכה, מה שגרם למעבר לא-חלק בין הקשה
+  // לתשובה.
+  return yemot.readDigits(prompt, 'QuestionChoice', {
+    min: 1,
+    max: page2.length,
+    timeoutSec: 20,
+    playAs: 'Digits',
+    allowStar: 'yes',
+  });
 }
 
 async function handleQuestionChosen(body) {
   // ימות שולחת מחדש את כל הפרמטרים שנאספו קודם, כולל CategoryChoice
   const idx = Number(body.QuestionChoice) - 1;
-  const categoryId = await resolveCategoryIdFromChoice(body);
+  let categoryId;
+  try {
+    categoryId = await resolveCategoryIdFromChoice(body);
+  } catch (err) {
+    console.error('handleQuestionChosen timeout/error (resolveCategoryId):', err);
+    return yemot.idListMessage([yemot.ttsSegment(MSG_WP_TIMEOUT)], yemot.goToFolder('/'));
+  }
 
   if (!categoryId) {
     return yemot.idListMessage([yemot.ttsSegment(MSG_INVALID_CHOICE)], yemot.goToFolder('/'));
   }
 
-  const questions = await wp.getQuestionsByCategory(categoryId);
+  let questions;
+  try {
+    questions = await withTimeout(
+      wp.getQuestionsByCategory(categoryId),
+      WP_TIMEOUT_MS,
+      'wp.getQuestionsByCategory'
+    );
+  } catch (err) {
+    console.error('handleQuestionChosen timeout/error:', err);
+    return yemot.idListMessage([yemot.ttsSegment(MSG_WP_TIMEOUT)], yemot.goToFolder('/'));
+  }
+
   const page = questions.slice(0, MENU_PAGE_SIZE);
   const question = page[idx];
 
@@ -183,7 +251,7 @@ async function handleQuestionChosen(body) {
 
 async function resolveCategoryIdFromChoice(body) {
   if (!body.CategoryChoice) return null;
-  const categories = await wp.getCategories();
+  const categories = await withTimeout(wp.getCategories(), WP_TIMEOUT_MS, 'wp.getCategories');
   const page = categories.slice(0, MENU_PAGE_SIZE);
   const category = page[Number(body.CategoryChoice) - 1];
   return category ? category.id : null;
@@ -258,7 +326,7 @@ async function transcribeAudio(wavBytes) {
  * לכותרת/תוכן, ומחזיר את הניקוד הגבוה ביותר (אם הוא מעל סף מינימלי).
  */
 async function findBestMatch(query) {
-  const questions = await wp.getAllQuestions();
+  const questions = await withTimeout(wp.getAllQuestions(), WP_TIMEOUT_MS, 'wp.getAllQuestions');
   const queryWords = normalizeWords(query);
 
   if (!queryWords.length) return null;
