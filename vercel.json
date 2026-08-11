@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/ivr.js": {
+      "maxDuration": 30
+    },
+    "api/transcribe.py": {
+      "maxDuration": 30
+    }
+  }
+}
