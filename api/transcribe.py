@@ -1,9 +1,10 @@
 """
-תמלול קול - שלוחה 4 (חיפוש קולי)
+תמלול קול - חיפוש קולי
 ====================================
 פונקציית Vercel Python נפרדת מהמערכת הראשית (Node.js), אחראית אך ורק על
-תמלול קובץ הקלטה (wav) לטקסט. הקוד ב-api/yemot/index.js (Node.js) מוריד את
-ההקלטה מימות ושולח את בייטי ה-wav הגולמיים ל-endpoint הזה בבקשת POST.
+תמלול קובץ הקלטה (wav) לטקסט. api/ivr.js (Node.js) מוריד את ההקלטה מימות
+(דרך lib/yemotApi.js) ושולח את בייטי ה-wav הגולמיים ל-endpoint הזה בבקשת
+POST (Content-Type: application/octet-stream). ראה TRANSCRIBE_URL ב-api/ivr.js.
 
 שיטת התמלול: ספריית SpeechRecognition (PyPI), עם recognize_google() -
 זו שיטת Google Web Speech API עם מפתח ברירת מחדל המוטמע בספרייה עצמה,
@@ -12,9 +13,9 @@
 מצד גוגל - מתאים לפרויקט בהיקף כזה, אך לא לשירות production בקנה מידה גדול.
 
 ריפוד השקט: לפני שליחת האודיו לתמלול, מוסיפים חצי שנייה של שקט בתחילת
-ובסוף ההקלטה (כפי שהתבקש) - כדי שהתמלול לא "יבלע" חצאי מילים בקצוות
-ההקלטה. זה נעשה כאן (בפייתון) על בייטי ה-wav שהתקבלו, ולא בצד ימות - אין
-אפשרות ב-type='record' של ימות להוסיף שקט לתוך ההקלטה עצמה.
+ובסוף ההקלטה - כדי שהתמלול לא "יבלע" חצאי מילים בקצוות ההקלטה. זה נעשה
+כאן (בפייתון) על בייטי ה-wav שהתקבלו, ולא בצד ימות - אין אפשרות ב-
+type='record' של ימות להוסיף שקט לתוך ההקלטה עצמה.
 """
 
 import io
@@ -76,6 +77,10 @@ class handler(BaseHTTPRequestHandler):
 
         except Exception as exc:  # noqa: BLE001 - צריך להחזיר כל שגיאה כ-JSON ל-Node.js
             self._send_json(500, {'error': str(exc)})
+
+    def do_GET(self):
+        # לא נתמך - ה-endpoint הזה מיועד רק לקבלת אודיו מ-api/ivr.js דרך POST
+        self._send_json(405, {'error': 'Method not allowed - use POST'})
 
     def _send_json(self, status: int, payload: dict):
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
